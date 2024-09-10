@@ -1,0 +1,751 @@
+---
+title: "bly_2024_local"
+author: "Shannon Rose Blair"
+date: "2024-08-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/Users/skb/Documents/Documents_Local/shrimp/rad/bly_2024")
+```
+
+knitr::opts_knit$set(root.dir = "/Users/skb/Documents/Documents_Local/shrimp/rad/bly_2024")
+library(snpR)
+library(tidyverse)
+
+#for more detailed annotations on the code, please see the Rmd for the rangewide dataset. Much of the code is replicated and the annotations are more in-depth.
+
+```{r sacramento}
+#define local name
+popn="sacramento"
+
+#import data
+snp_meta_in <- paste0("bly_2024_",popn,".mafs")
+sample_meta_in <- paste0("bly_2024_",popn,"_meta.txt")
+gen <- read.delim(paste0("bly_2024_",popn,".geno"), header=FALSE)
+sm<- read.delim(snp_meta_in)
+snp_meta <- sm[,1:4]
+rm(sm)
+gen <- gen[,3:(ncol(gen)-1)]
+samp_meta <- read.delim(sample_meta_in,header=TRUE)
+
+#format as snpR
+pop <- import.snpR.data(gen,sample.meta = samp_meta,snp.meta = snp_meta ,mDat = "NN")
+
+##filter
+pop_hofilt <- filter_snps(x=pop, hf_hets = 0.6, min_ind=0.5,non_poly=FALSE)
+
+pop_elsefilt <- filter_snps(x = pop, maf = 0.05, hf_hets = 0.6, min_ind =  0.8, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE) 
+
+##diversity##
+##
+
+pop_hofilt <- calc_pi(pop_hofilt, "Population")
+pop_hofilt <- calc_ho(pop_hofilt, "Population")
+pop_hofilt <- calc_he(pop_hofilt, "Population")
+pop_hofilt <- calc_private(pop_hofilt, "Population")
+pop_hofilt <- calc_tajimas_d(pop_hofilt, "Population.chromo",sigma=50,step=25)
+stats <- get.snpR.stats(pop_hofilt, "Population", stats = c("pi", "ho", "he")) 
+thetas <- get.snpR.stats(pop_hofilt, "Population.chromo", stats="tajimas_d")
+
+#format and prep for graphics
+basin_divmeans <- stats$weighted.means
+basin_divmeans$ho_aut <- basin_divmeans$weighted_mean_ho / nsnps(pop_hofilt)
+basin_divmeans$he_aut <- basin_divmeans$weighted_mean_he / nsnps(pop_hofilt)
+basin_thetas <- filter(thetas$weighted.means,snp.subfacet==".OVERALL_MEAN")
+
+all_thetas <- thetas$single.window
+all_thetas$wst_persite <- all_thetas$ws.theta / all_thetas$n_snps
+all_thetas$tst_persite <- all_thetas$ts.theta / all_thetas$n_snps
+all_thetas$D <- as.numeric(all_thetas$D)
+mean_thetas <- all_thetas %>% group_by(subfacet) %>% filter(n_snps>1000) %>% summarise(Taj_D=mean(D),mean_ttheta_persite=mean(tst_persite),sd_ttheta_persite=sd(tst_persite),mean_wtheta_persite=mean(wst_persite),sd_wtheta_persite=sd(wst_persite))
+
+#write the summary
+write_delim(mean_thetas,file=paste0(popn,"_mean_diversity_values.txt"),delim="\t",quote="none")
+write_delim(basin_divmeans,file=paste0(popn,"_mean_ho_diversity.txt"),delim="\t",quote="none")
+write_delim(all_thetas,paste0(popn,"thetas_raw.txt"),delim="\t",quote="none")
+write_delim(basin_thetas,paste0(popn,"_mean_tajD.txt"),delim="\t",quote="none")
+
+ts2 <- pivot_longer(all_thetas, cols=c(16,17),values_to="theta", names_to="Theta_Measure")
+ts2$Theta_Measure[ts2$Theta_Measure=="tst_persite"] <- "Tajima's Theta"
+ts2$Theta_Measure[ts2$Theta_Measure=="wst_persite"] <- "Watterson's Theta"
+ylim1 = boxplot.stats(ts2$theta)$stats[c(1, 5)]
+
+ts2 %>% filter(n_snps>1000) %>% ggplot(aes(x=subfacet,y=theta,fill=Theta_Measure)) + geom_boxplot(outlier.alpha=0.01) + coord_cartesian(ylim = ylim1*1.05) + xlab("Population") + ylab("Theta Diversity Value, Sliding Window") + theme_minimal() + theme(axis.text=element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=20)) + fill_palette(c("#2ca25f",	"#99d8c9")) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=20),axis.title=element_text(size=20),legend.text = element_text(size=20),legend.title=element_text(size=20))
+
+ggsave(paste0(popn,"_diversity_thetas_boxplots.png"),device="png",dpi=300)
+
+ts2 %>% filter(n_snps>1000) %>% ggplot(aes(x = theta, y = subfacet, fill = subfacet)) + geom_density_ridges() + theme_ridges(font_size=20,) + theme(legend.position = "none",) + xlab("Per-Site Theta Values") +ylab("Population") + fill_palette(c("forestgreen","turquoise","orchid","#BD0026")) + xlim(c(-0.005,0.06)) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=18),axis.title=element_text(size=18),legend.text = element_text(size=18),legend.title=element_text(size=18)) + facet_wrap(facets="Theta_Measure")
+
+ggsave(paste0(popn,"_diversity_thetas_ridgeline.png"),device="png",dpi=300)
+
+
+##calculate smoothed averages##
+sliding_ho <- calc_smoothed_averages(x = pop_hofilt, facets = "Population", sigma = 50, step =25)
+sliding_ho_stats <- get.snpR.stats(sliding_ho, facets="Population",stats=c("ho","pi"))
+single_ho <- sliding_ho_stats$single.window
+single_pi <- sliding_ho_stats$single.window
+#divide by number of interrogated sites for autosomal ho
+single_ho$auto_ho <- single_ho$ho/single_ho$n_snps
+
+single_ho %>% ggplot(aes(x = auto_ho, y = subfacet, fill = subfacet)) + geom_density_ridges() + theme_ridges(font_size=20) + theme(legend.position = "none",text=element_text(family="open sans",size=20)) + xlab("Observed Heterozygosity") +ylab("Population") + fill_palette(c("forestgreen","turquoise","orchid","#BD0026")) + xlim(c(0,0.000007))
+
+ggsave(paste0(popn,"_diversity_ho_ridgeline.png"),device="png",dpi=300)
+
+###ibd
+##
+
+pop2 <- calc_isolation_by_distance(
+  pop_elsefilt,
+  facets = "Population",
+  x_y = c("long", "lat"),
+  genetic_distance_method = "Edwards",
+  interpolate = "bernoulli",
+)
+
+ibd2 <- get.snpR.stats(pop2, "Population", stats=c("isolation_by_distance","geographic_distance"))
+
+ibd2
+
+###Fst
+fst <- calc_pairwise_fst(pop_elsefilt, facets="Population")
+fst2 <- get.snpR.stats(fst,"Population",stats="fst")
+
+plot_pairwise_fst_heatmap(fst,facets="Population",viridis.option="mako",lab_lower=TRUE) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=22,family="open sans"),axis.title=element_text(size=1)) + geom_label(ggplot2::aes(label = round(weighted_mean_fst, 3), x = p2, y = p1), fill = "white",size=14, family="open sans")
+
+ggsave(paste0(popn,"_fst_table.png"),device="png",dpi=300)
+
+sac_m <- unique(data.frame("Population"=samp_meta$Population,"long"=samp_meta$long,"lat"=samp_meta$lat))
+sac_m <- sac_m[-5,]
+d1 <- geodist(sac_m,paired=TRUE,measure = "geodesic")
+#turn matrix into pairwise
+colnames(d1) <- sac_m$Population
+row.names(d1) <- sac_m$Population
+d1 <- as.data.frame(d1)
+xy <- t(combn(colnames(d1), 2))
+dists <- data.frame(xy, dist=d1[xy])
+dists$subfacet <- paste0(dists$X1,"~",dists$X2)
+dists2 <- dists
+dists2$subfacet <- paste0(dists$X2,"~",dists$X1)
+sacramento_dists <- rbind(dists,dists2)
+
+#I want it in km, rather than m, so divide by 1000
+sacramento_dists$dist_km <- dists$dist / 1000
+
+sac_fst_dist <- fst2$weighted.means
+sac_fst_dist <- left_join(sac_fst_dist,sacramento_dists,by="subfacet")
+sac_fst_dist$t_geodist <- log(sac_fst_dist$dist_km) #take the natural log
+sac_fst_dist$t_fst <- sac_fst_dist$weighted_mean_fst/(1-sac_fst_dist$weighted_mean_fst)
+
+
+###PCA###
+pc <- plot_clusters(pop_elsefilt,facets="Population")
+pca <- pc$data$pca
+popname <- str_to_title(popn)
+ 
+ggplot2::ggplot(pca, aes(PC1, PC2, fill=Population)) + geom_point(shape=21,size=8,stroke=1) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC2 (",pc$pca_loadings[2],"%)")) +ggtitle(paste0("VPFS ",popname, " Intra-Site Analysis: All Loci PC1-PC2")) +fill_palette(c("forestgreen","turquoise","orchid","#BD0026")) + theme_minimal() +theme(text=element_text(size=22,family="open sans")) 
+
+ggsave(paste0(popn,"_pca_pc1vpc2.png"),device="png",dpi=300)
+
+ggplot2::ggplot(pca, aes(PC1, PC3, fill=Population)) + geom_point(shape=21,size=8,stroke=1) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC3 (",pc$pca_loadings[3],"%)")) +ggtitle(paste0("VPFS ",popname, " Intra-Site Analysis: All Loci PC1-PC3")) +fill_palette(c("forestgreen","turquoise","orchid","#BD0026")) +theme_minimal() +theme(text=element_text(size=22,family="open sans")) 
+
+ggsave(paste0(popn,"_pca_pc1vpc3.png"),device="png",dpi=300)
+
+###reformat for Bayesass###
+pop_morefilt <- filter_snps(x = pop,maf = 0.05, hf_hets = 0.6,min_ind =  0.99, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE)
+
+pop_forbayes <- as.data.frame(pop_morefilt)
+pop_fb_samp <- sample.meta(pop_morefilt)
+pop_fb_snps <- snp.meta(pop_morefilt)
+pop_fb_snps$chr_pos <- paste0(pop_fb_snps$chromo,"_",pop_fb_snps$position)
+rownames(pop_forbayes) <- pop_fb_snps$chr_pos
+colnames(pop_forbayes) <- pop_fb_samp$sample
+pop_forbayes$allele <- rownames(pop_forbayes)
+test2 <- data.frame(pop_forbayes)
+test3 <- pivot_longer(test2, cols=c(1:(ncol(test2)-1)),names_to="sample")
+test4 <- right_join(samp_meta,test3,by="sample")
+test4$a1 <- str_split_i(test4$value,"",1)
+test4$a2 <- str_split_i(test4$value,"",2)
+test4$a1[test4$a1 =="N"] <- 0
+test4$a2[test4$a2 =="N"] <- 0
+test5 <- data.frame("indID"=test4$sample,"PopulationID"=test4$Population,"locID"=test4$allele,"allele1"=test4$a1,"allele2"=test4$a2)
+write_delim(test5,paste0(popn,"_for_ba3_snpr.txt"),delim=" ")
+##
+
+df2 <- data.frame(pop_elsefilt)
+df3 <- as.data.frame(t(df2))
+row.names(df3) <- sample.meta(pop_elsefilt)$sample
+colnames(df3) <- paste0(snp.meta(pop_elsefilt)$chromo,"_",snp.meta(pop_elsefilt)$position)
+t1 <- df2genind(df3, pop=sample.meta(pop_elsefilt)$Population,ncode=2,NA.char="NN")
+X <- tab(t1, NA.method="mean")
+D <- dist(X)
+tre <- nj(D)
+h2 <- c("forestgreen","turquoise","orchid","#BD0026")
+myCol <- h2[as.integer(pop(t1))]
+par(bg = "white",family="open sans")
+plot(tre, type = "unr", show.tip.lab = FALSE)
+tiplabels(col = "black", pch = 21, bg=myCol,cex=3.5)
+poplist <- c("Cook","Kiefer","Werre","Werre_B")
+mylegcol <- unique(myCol)
+legend(-30,180,legend=poplist, fill=mylegcol, cex=1, title="Population", bty="n")
+
+library("ape")
+df2 <- data.frame(pop_elsefilt)
+df3 <- as.data.frame(t(df2))
+row.names(df3) <- sample.meta(pop_elsefilt)$sample
+colnames(df3) <- paste0(snp.meta(pop_elsefilt)$chromo,"_",snp.meta(pop_elsefilt)$position)
+t1 <- df2genind(df3, pop=sample.meta(pop_elsefilt)$Population,ncode=2,NA.char="NN")
+X <- tab(t1, NA.method="mean")
+D <- dist(X)
+tre <- nj(D)
+h2 <- c("forestgreen","turquoise","orchid","#BD0026")
+myCol <- h2[as.integer(pop(t1))]
+par(bg = "white",family="open sans")
+plot(tre, type = "unr", show.tip.lab = FALSE)
+tiplabels(col = "black", pch = 21, bg=myCol,cex=3.5)
+poplist <- c("Cook","Kiefer","Werre","Werre_B")
+mylegcol <- unique(myCol)
+legend(-30,120,legend=poplist, fill=mylegcol, cex=1, title="Population", bty="n")
+ggsave(paste0(popn,"_njtree.png"), device="png", dpi=200)
+```
+
+```{r merced}
+#define local name
+popn="merced"
+setwd("~/Documents/Documents_Local/shrimp/rad/bly_2024")
+#import data
+snp_meta_in <- paste0("bly_2024_",popn,".mafs")
+sample_meta_in <- paste0("bly_2024_",popn,"_meta.txt")
+gen <- read.delim(paste0("bly_2024_",popn,".geno"), header=FALSE)
+sm<- read.delim(snp_meta_in)
+snp_meta <- sm[,1:4]
+rm(sm)
+gen <- gen[,3:(ncol(gen)-1)]
+samp_meta <- read.delim(sample_meta_in,header=TRUE)
+
+#format as snpR
+pop <- import.snpR.data(gen,sample.meta = samp_meta,snp.meta = snp_meta ,mDat = "NN")
+
+##filter
+pop_hofilt <- filter_snps(x=pop, hf_hets = 0.6, min_ind=0.5,non_poly=FALSE)
+
+pop_elsefilt <- filter_snps(x = pop, maf = 0.05, hf_hets = 0.6, min_ind =  0.8, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE) 
+
+##diversity##
+##
+
+pop_hofilt <- calc_pi(pop_hofilt, "Population")
+pop_hofilt <- calc_ho(pop_hofilt, "Population")
+pop_hofilt <- calc_he(pop_hofilt, "Population")
+pop_hofilt <- calc_private(pop_hofilt, "Population")
+pop_hofilt <- calc_tajimas_d(pop_hofilt, "Population.chromo",sigma=50,step=25)
+stats <- get.snpR.stats(pop_hofilt, "Population", stats = c("pi", "ho", "he")) 
+thetas <- get.snpR.stats(pop_hofilt, "Population.chromo", stats="tajimas_d")
+
+#format and prep for graphics
+basin_divmeans <- stats$weighted.means
+basin_divmeans$ho_aut <- basin_divmeans$weighted_mean_ho / nsnps(pop_hofilt)
+basin_divmeans$he_aut <- basin_divmeans$weighted_mean_he / nsnps(pop_hofilt)
+basin_thetas <- filter(thetas$weighted.means,snp.subfacet==".OVERALL_MEAN")
+
+all_thetas <- thetas$single.window
+all_thetas$wst_persite <- all_thetas$ws.theta / all_thetas$n_snps
+all_thetas$tst_persite <- all_thetas$ts.theta / all_thetas$n_snps
+all_thetas$D <- as.numeric(all_thetas$D)
+mean_thetas <- all_thetas %>% group_by(subfacet) %>% filter(n_snps>1000) %>% summarise(Taj_D=mean(D),mean_ttheta_persite=mean(tst_persite),sd_ttheta_persite=sd(tst_persite),mean_wtheta_persite=mean(wst_persite),sd_wtheta_persite=sd(wst_persite))
+
+#write the summary
+write_delim(mean_thetas,file=paste0(popn,"_mean_diversity_values.txt"),delim="\t",quote="none")
+write_delim(basin_divmeans,file=paste0(popn,"_mean_ho_diversity.txt"),delim="\t",quote="none")
+write_delim(all_thetas,paste0(popn,"thetas_raw.txt"),delim="\t",quote="none")
+write_delim(basin_thetas,paste0(popn,"_mean_tajD.txt"),delim="\t",quote="none")
+
+ts2 <- pivot_longer(all_thetas, cols=c(16,17),values_to="theta", names_to="Theta_Measure")
+ts2$Theta_Measure[ts2$Theta_Measure=="tst_persite"] <- "Tajima's Theta"
+ts2$Theta_Measure[ts2$Theta_Measure=="wst_persite"] <- "Watterson's Theta"
+ylim1 = boxplot.stats(ts2$theta)$stats[c(1, 5)]
+
+ts2 %>% filter(n_snps>1000) %>% ggplot(aes(x=subfacet,y=theta,fill=Theta_Measure)) + geom_boxplot(outlier.alpha=0.01) + coord_cartesian(ylim = ylim1*1.05) + xlab("Population") + ylab("Theta Diversity Value, Sliding Window") + theme_minimal() + theme(axis.text=element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=20)) + fill_palette(c("#2ca25f",	"#99d8c9")) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=20),axis.title=element_text(size=20),legend.text = element_text(size=20),legend.title=element_text(size=20))
+
+ggsave(paste0(popn,"_diversity_thetas_boxplots.png"),device="png",dpi=300)
+
+ts2 %>% filter(n_snps>1000) %>% ggplot(aes(x = theta, y = subfacet, fill = subfacet)) + geom_density_ridges() + theme_ridges(font_size=20,) + theme(legend.position = "none",) + xlab("Per-Site Theta Values") +ylab("Population") + fill_palette(c("#FDBF6F","yellow1","gold2","sienna2","firebrick1","coral3","#F03B20","#FF7F00")) + xlim(c(-0.005,0.06)) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=18),axis.title=element_text(size=18),legend.text = element_text(size=18),legend.title=element_text(size=18)) + facet_wrap(facets="Theta_Measure")
+
+ggsave(paste0(popn,"_diversity_thetas_ridgeline.png"),device="png",dpi=300)
+
+
+##calculate smoothed averages##
+sliding_ho <- calc_smoothed_averages(x = pop_hofilt, facets = "Population", sigma = 50, step =25)
+sliding_ho_stats <- get.snpR.stats(sliding_ho, facets="Population",stats=c("ho","pi"))
+single_ho <- sliding_ho_stats$single.window
+single_pi <- sliding_ho_stats$single.window
+#divide by number of interrogated sites for autosomal ho
+single_ho$auto_ho <- single_ho$ho/single_ho$n_snps
+
+single_ho %>% ggplot(aes(x = auto_ho, y = subfacet, fill = subfacet)) + geom_density_ridges() + theme_ridges(font_size=20) + theme(legend.position = "none",text=element_text(family="open sans",size=20)) + xlab("Observed Heterozygosity") +ylab("Population") + fill_palette(c("#FDBF6F","yellow1","gold2","sienna2","firebrick1","coral3","#F03B20","#FF7F00")) + xlim(c(0,0.000007))
+
+ggsave(paste0(popn,"_diversity_ho_ridgeline.png"),device="png",dpi=300)
+
+###ibd
+##
+
+pop2 <- calc_isolation_by_distance(
+  pop_elsefilt,
+  facets = "Population",
+  x_y = c("long", "lat"),
+  genetic_distance_method = "Edwards",
+  interpolate = "bernoulli",
+)
+
+ibd2 <- get.snpR.stats(pop2, "Population", stats=c("isolation_by_distance","geographic_distance"))
+
+ibd2
+
+###Fst
+fst <- calc_pairwise_fst(pop_elsefilt, facets="Population")
+fst2 <- get.snpR.stats(fst,"Population",stats="fst")
+
+plot_pairwise_fst_heatmap(fst,facets="Population",facet.order=c("Dutchman","Dutchman_B","Dutchman_C","UCMerced","UCM_B","UCM_C","UCM_D","UCM_E"),viridis.option="mako",lab_lower=TRUE) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=22,family="open sans"),axis.title=element_text(size=1)) + geom_label(ggplot2::aes(label = round(weighted_mean_fst, 3), x = p2, y = p1), fill = "white",size=10, family="open sans")
+
+ggsave(paste0(popn,"_fst_table.png"),device="png",dpi=300)
+
+merced_m <- unique(data.frame("Population"=samp_meta$Population,"long"=samp_meta$long,"lat"=samp_meta$lat))
+d1 <- geodist(merced_m,paired=TRUE,measure = "geodesic")
+#turn matrix into pairwise
+colnames(d1) <- merced_m$Population
+row.names(d1) <- merced_m$Population
+d1 <- as.data.frame(d1)
+xy <- t(combn(colnames(d1), 2))
+dists <- data.frame(xy, dist=d1[xy])
+dists$subfacet <- paste0(dists$X1,"~",dists$X2)
+dists2 <- dists
+dists2$subfacet <- paste0(dists$X2,"~",dists$X1)
+merced_dists <- rbind(dists,dists2)
+
+#I want it in km, rather than m, so divide by 1000
+merced_dists$dist_km <- dists$dist / 1000
+
+merced_fst_dist <- fst2$weighted.means
+merced_fst_dist <- left_join(merced_fst_dist,merced_dists,by="subfacet")
+merced_fst_dist$t_geodist <- log(merced_fst_dist$dist_km) #take the natural log
+merced_fst_dist$t_fst <- merced_fst_dist$weighted_mean_fst/(1-merced_fst_dist$weighted_mean_fst)
+
+
+###PCA###
+pc <- plot_clusters(pop_elsefilt,facets="Population")
+pca <- pc$data$pca
+popname <- str_to_title(popn)
+ 
+ggplot2::ggplot(pca, aes(PC1, PC2, fill=Population)) + geom_point(shape=21,size=8,stroke=1) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC2 (",pc$pca_loadings[2],"%)")) +ggtitle(paste0("VPFS ",popname, " Intra-Site Analysis: All Loci PC1-PC2")) +fill_palette(c("#FDBF6F","yellow1","gold2","sienna2","firebrick1","coral3","#F03B20","#FF7F00")) +theme_minimal() + theme(text=element_text(size=22,family="open sans")) 
+
+ggsave(paste0(popn,"_pca_pc1vpc2.png"),device="png",dpi=300)
+
+ggplot2::ggplot(pca, aes(PC1, PC3, fill=Population)) + geom_point(shape=21,size=8,stroke=1) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC3 (",pc$pca_loadings[3],"%)")) +ggtitle(paste0("VPFS ",popname, " Intra-Site Analysis: All Loci PC1-PC3")) +fill_palette(c("#FDBF6F","yellow1","gold2","sienna2","firebrick1","coral3","#F03B20","#FF7F00")) +theme(text=element_text(size=22,family="open sans")) 
+
+ggsave(paste0(popn,"_pca_pc1vpc3.png"),device="png",dpi=300)
+
+###reformat for Bayesass###
+pop_morefilt <- filter_snps(x = pop,maf = 0.05, hf_hets = 0.6,min_ind =  0.99, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE)
+
+pop_forbayes <- as.data.frame(pop_morefilt)
+pop_fb_samp <- sample.meta(pop_morefilt)
+pop_fb_snps <- snp.meta(pop_morefilt)
+pop_fb_snps$chr_pos <- paste0(pop_fb_snps$chromo,"_",pop_fb_snps$position)
+rownames(pop_forbayes) <- pop_fb_snps$chr_pos
+colnames(pop_forbayes) <- pop_fb_samp$sample
+pop_forbayes$allele <- rownames(pop_forbayes)
+test2 <- data.frame(pop_forbayes)
+test3 <- pivot_longer(test2, cols=c(1:(ncol(test2)-1)),names_to="sample")
+test4 <- right_join(samp_meta,test3,by="sample")
+test4$a1 <- str_split_i(test4$value,"",1)
+test4$a2 <- str_split_i(test4$value,"",2)
+test4$a1[test4$a1 =="N"] <- 0
+test4$a2[test4$a2 =="N"] <- 0
+test5 <- data.frame("indID"=test4$sample,"PopulationID"=test4$Population,"locID"=test4$allele,"allele1"=test4$a1,"allele2"=test4$a2)
+write_delim(test5,paste0(popn,"_for_ba3_snpr.txt"),delim=" ")
+##
+##njtree
+
+library("ape")
+df2 <- data.frame(pop_elsefilt)
+df3 <- as.data.frame(t(df2))
+row.names(df3) <- sample.meta(pop_elsefilt)$sample
+colnames(df3) <- paste0(snp.meta(pop_elsefilt)$chromo,"_",snp.meta(pop_elsefilt)$position)
+t1 <- df2genind(df3, pop=sample.meta(pop_elsefilt)$Population,ncode=2,NA.char="NN")
+X <- tab(t1, NA.method="mean")
+D <- dist(X)
+tre <- nj(D)
+#levels(t1@pop) <- c("Dutchman","Dutchman_B","Dutchman_C","UCMerced","UCM_B","UCM_C","UCM_D","UCM_E")
+h2 <-c("#F03B20","firebrick1","sienna2","coral3","#FF7F00","#FDBF6F","gold2","yellow1")
+myCol <- h2[as.integer(pop(t1))]
+par(bg = "white",family="open sans")
+plot(tre, type = "unr", show.tip.lab = FALSE)
+tiplabels(col = "black", pch = 21, bg=myCol,cex=3.5)
+poplist <- levels(t1@pop)
+mylegcol <- unique(myCol)
+legend(-45,180,legend=poplist, fill=mylegcol, cex=1, title="Population", bty="n")
+
+```
+
+```{r oregon}
+#define local name
+popn="oregon"
+#setwd("~/Documents/Documents_Local/shrimp/rad/bly_2024")
+#import data
+snp_meta_in <- paste0("bly_2024_",popn,".mafs")
+sample_meta_in <- paste0("bly_2024_",popn,"_meta.txt")
+gen <- read.delim(paste0("bly_2024_",popn,".geno"), header=FALSE)
+sm<- read.delim(snp_meta_in)
+snp_meta <- sm[,1:4]
+rm(sm)
+gen <- gen[,3:(ncol(gen)-1)]
+samp_meta <- read.delim(sample_meta_in,header=TRUE)
+
+#format as snpR
+pop <- import.snpR.data(gen,sample.meta = samp_meta,snp.meta = snp_meta ,mDat = "NN")
+
+##filter
+pop_hofilt <- filter_snps(x=pop, hf_hets = 0.6, min_ind=0.5,non_poly=FALSE)
+
+pop_elsefilt <- filter_snps(x = pop, maf = 0.05, hf_hets = 0.6, min_ind =  0.8, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE) 
+
+##diversity##
+##
+
+pop_hofilt <- calc_pi(pop_hofilt, "Population")
+pop_hofilt <- calc_ho(pop_hofilt, "Population")
+pop_hofilt <- calc_he(pop_hofilt, "Population")
+pop_hofilt <- calc_private(pop_hofilt, "Population")
+pop_hofilt <- calc_tajimas_d(pop_hofilt, "Population.chromo",sigma=50,step=25)
+stats <- get.snpR.stats(pop_hofilt, "Population", stats = c("pi", "ho", "he")) 
+thetas <- get.snpR.stats(pop_hofilt, "Population.chromo", stats="tajimas_d")
+
+#format and prep for graphics
+basin_divmeans <- stats$weighted.means
+basin_divmeans$ho_aut <- basin_divmeans$weighted_mean_ho / nsnps(pop_hofilt)
+basin_divmeans$he_aut <- basin_divmeans$weighted_mean_he / nsnps(pop_hofilt)
+basin_thetas <- filter(thetas$weighted.means,snp.subfacet==".OVERALL_MEAN")
+
+all_thetas <- thetas$single.window
+all_thetas$wst_persite <- all_thetas$ws.theta / all_thetas$n_snps
+all_thetas$tst_persite <- all_thetas$ts.theta / all_thetas$n_snps
+all_thetas$D <- as.numeric(all_thetas$D)
+mean_thetas <- all_thetas %>% group_by(subfacet) %>% filter(n_snps>1000) %>% summarise(Taj_D=mean(D),mean_ttheta_persite=mean(tst_persite),sd_ttheta_persite=sd(tst_persite),mean_wtheta_persite=mean(wst_persite),sd_wtheta_persite=sd(wst_persite))
+
+#write the summary
+write_delim(mean_thetas,file=paste0(popn,"_mean_diversity_values.txt"),delim="\t",quote="none")
+write_delim(basin_divmeans,file=paste0(popn,"_mean_ho_diversity.txt"),delim="\t",quote="none")
+write_delim(all_thetas,paste0(popn,"thetas_raw.txt"),delim="\t",quote="none")
+write_delim(basin_thetas,paste0(popn,"_mean_tajD.txt"),delim="\t",quote="none")
+
+ts2 <- pivot_longer(all_thetas, cols=c(16,17),values_to="theta", names_to="Theta_Measure")
+ts2$Theta_Measure[ts2$Theta_Measure=="tst_persite"] <- "Tajima's Theta"
+ts2$Theta_Measure[ts2$Theta_Measure=="wst_persite"] <- "Watterson's Theta"
+ylim1 = boxplot.stats(ts2$theta)$stats[c(1, 5)]
+
+ts2 %>% filter(n_snps>1000) %>% ggplot(aes(x=subfacet,y=theta,fill=Theta_Measure)) + geom_boxplot(outlier.alpha=0.01) + coord_cartesian(ylim = ylim1*1.05) + xlab("Population") + ylab("Theta Diversity Value, Sliding Window") + theme_minimal() + theme(axis.text=element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=20)) + fill_palette(c("#2ca25f",	"#99d8c9")) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=20),axis.title=element_text(size=20),legend.text = element_text(size=20),legend.title=element_text(size=20))
+
+ggsave(paste0(popn,"_diversity_thetas_boxplots.png"),device="png",dpi=300)
+
+ts2 %>% filter(n_snps>1000) %>% ggplot(aes(x = theta, y = subfacet, fill = subfacet)) + geom_density_ridges() + theme_ridges(font_size=20,) + theme(legend.position = "none",) + xlab("Per-Site Theta Values") +ylab("Population") + fill_palette(c("royalblue","skyblue","pink","pink3")) + xlim(c(-0.005,0.06)) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=18),axis.title=element_text(size=18),legend.text = element_text(size=18),legend.title=element_text(size=18)) + facet_wrap(facets="Theta_Measure")
+
+ggsave(paste0(popn,"_diversity_thetas_ridgeline.png"),device="png",dpi=300)
+
+
+##calculate smoothed averages##
+sliding_ho <- calc_smoothed_averages(x = pop_hofilt, facets = "Population", sigma = 50, step =25)
+sliding_ho_stats <- get.snpR.stats(sliding_ho, facets="Population",stats=c("ho","pi"))
+single_ho <- sliding_ho_stats$single.window
+single_pi <- sliding_ho_stats$single.window
+#divide by number of interrogated sites for autosomal ho
+single_ho$auto_ho <- single_ho$ho/single_ho$n_snps
+
+single_ho %>% ggplot(aes(x = auto_ho, y = subfacet, fill = subfacet)) + geom_density_ridges() + theme_ridges(font_size=20) + theme(legend.position = "none",text=element_text(family="open sans",size=20)) + xlab("Observed Heterozygosity") +ylab("Population") + fill_palette(c("royalblue","skyblue","pink","pink3")) + xlim(c(0,0.000007))
+
+ggsave(paste0(popn,"_diversity_ho_ridgeline.png"),device="png",dpi=300)
+
+###ibd
+##
+
+pop2 <- calc_isolation_by_distance(
+  pop_elsefilt,
+  facets = "Population",
+  x_y = c("long", "lat"),
+  genetic_distance_method = "Edwards",
+  interpolate = "bernoulli",
+)
+
+ibd2 <- get.snpR.stats(pop2, "Population", stats=c("isolation_by_distance","geographic_distance"))
+
+ibd2
+
+###Fst
+fst <- calc_pairwise_fst(pop_elsefilt, facets="Population")
+fst2 <- get.snpR.stats(fst,"Population",stats="fst")
+
+plot_pairwise_fst_heatmap(fst,facets="Population",,viridis.option="mako",lab_lower=TRUE) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=22,family="open sans"),axis.title=element_text(size=1)) + geom_label(ggplot2::aes(label = round(weighted_mean_fst, 3), x = p2, y = p1), fill = "white",size=14, family="open sans")
+
+ggsave(paste0(popn,"_fst_table.png"),device="png",dpi=300)
+
+oregon_m <- unique(data.frame("Population"=samp_meta$Population,"long"=samp_meta$long,"lat"=samp_meta$lat))
+d1 <- geodist(oregon_m,paired=TRUE,measure = "geodesic")
+#turn matrix into pairwise
+colnames(d1) <- oregon_m$Population
+row.names(d1) <- oregon_m$Population
+d1 <- as.data.frame(d1)
+xy <- t(combn(colnames(d1), 2))
+dists <- data.frame(xy, dist=d1[xy])
+dists$subfacet <- paste0(dists$X1,"~",dists$X2)
+dists2 <- dists
+dists2$subfacet <- paste0(dists$X2,"~",dists$X1)
+oregon_dists <- rbind(dists,dists2)
+
+#I want it in km, rather than m, so divide by 1000
+oregon_dists$dist_km <- dists$dist / 1000
+
+oregon_fst_dist <- fst2$weighted.means
+oregon_fst_dist <- left_join(oregon_fst_dist,oregon_dists,by="subfacet")
+oregon_fst_dist$t_geodist <- log(oregon_fst_dist$dist_km) #take the natural log
+oregon_fst_dist$t_fst <- oregon_fst_dist$weighted_mean_fst/(1-oregon_fst_dist$weighted_mean_fst)
+
+
+###PCA###
+pc <- plot_clusters(pop_elsefilt,facets="Population")
+pca <- pc$data$pca
+popname <- str_to_title(popn)
+ 
+ggplot2::ggplot(pca, aes(PC1, PC2, fill=Population)) + geom_point(shape=21,size=8,stroke=1) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC2 (",pc$pca_loadings[2],"%)")) +ggtitle(paste0("VPFS ",popname, " Intra-Site Analysis: All Loci PC1-PC2")) +fill_palette(c("royalblue","skyblue","pink","pink3")) +theme_minimal() +theme(text=element_text(size=22,family="open sans")) 
+
+ggsave(paste0(popn,"_pca_pc1vpc2.png"),device="png",dpi=300)
+
+ggplot2::ggplot(pca, aes(PC1, PC3, fill=Population)) + geom_point(shape=21,size=8,stroke=1) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC3 (",pc$pca_loadings[3],"%)")) +ggtitle(paste0("VPFS ",popname, " Intra-Site Analysis: All Loci PC1-PC3")) +fill_palette(c("royalblue","skyblue","pink","pink3")) +theme_minimal() +theme(text=element_text(size=22,family="open sans")) 
+
+ggsave(paste0(popn,"_pca_pc1vpc3.png"),device="png",dpi=300)
+
+###reformat for Bayesass###
+pop_morefilt <- filter_snps(x = pop,maf = 0.05, hf_hets = 0.6,min_ind =  0.99, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE)
+
+pop_forbayes <- as.data.frame(pop_morefilt)
+pop_fb_samp <- sample.meta(pop_morefilt)
+pop_fb_snps <- snp.meta(pop_morefilt)
+pop_fb_snps$chr_pos <- paste0(pop_fb_snps$chromo,"_",pop_fb_snps$position)
+rownames(pop_forbayes) <- pop_fb_snps$chr_pos
+colnames(pop_forbayes) <- pop_fb_samp$sample
+pop_forbayes$allele <- rownames(pop_forbayes)
+test2 <- data.frame(pop_forbayes)
+test3 <- pivot_longer(test2, cols=c(1:(ncol(test2)-1)),names_to="sample")
+test4 <- right_join(samp_meta,test3,by="sample")
+test4$a1 <- str_split_i(test4$value,"",1)
+test4$a2 <- str_split_i(test4$value,"",2)
+test4$a1[test4$a1 =="N"] <- 0
+test4$a2[test4$a2 =="N"] <- 0
+test5 <- data.frame("indID"=test4$sample,"PopulationID"=test4$Population,"locID"=test4$allele,"allele1"=test4$a1,"allele2"=test4$a2)
+write_delim(test5,paste0(popn,"_for_ba3_snpr.txt"),delim=" ")
+##
+##njtree
+
+library("ape")
+df2 <- data.frame(pop_elsefilt)
+df3 <- as.data.frame(t(df2))
+row.names(df3) <- sample.meta(pop_elsefilt)$sample
+colnames(df3) <- paste0(snp.meta(pop_elsefilt)$chromo,"_",snp.meta(pop_elsefilt)$position)
+t1 <- df2genind(df3, pop=sample.meta(pop_elsefilt)$Population,ncode=2,NA.char="NN")
+X <- tab(t1, NA.method="mean")
+D <- dist(X)
+tre <- nj(D)
+#levels(t1@pop) <- c("Oregon_A","Oregon_B","Oregon_C","Oregon_D")
+h2 <- rev(c("royalblue","skyblue","pink","pink3"))
+myCol <- h2[as.integer(pop(t1))]
+par(bg = "white",family="open sans")
+plot(tre, type = "unr", show.tip.lab = FALSE)
+tiplabels(col = "black", pch = 21, bg=myCol,cex=3.5)
+poplist <- levels(t1@pop)
+mylegcol <- unique(myCol)
+legend(-30,100,legend=poplist, fill=mylegcol, cex=1, title="Population", bty="n")
+ggsave(paste0(popn,"_njtree.png"), device="png", dpi=200)
+```
+
+```{r rockpools}
+#define local name
+popn="rockpools"
+
+#import data
+snp_meta_in <- paste0("bly_2024_",popn,".mafs")
+sample_meta_in <- paste0("bly_2024_",popn,"_meta.txt")
+gen <- read.delim(paste0("bly_2024_",popn,".geno"), header=FALSE)
+sm<- read.delim(snp_meta_in)
+snp_meta <- sm[,1:4]
+rm(sm)
+gen <- gen[,3:(ncol(gen)-1)]
+samp_meta <- read.delim(sample_meta_in,header=TRUE)
+
+#format as snpR
+pop <- import.snpR.data(gen,sample.meta = samp_meta,snp.meta = snp_meta ,mDat = "NN")
+
+##filter
+pop_hofilt <- filter_snps(x=pop, hf_hets = 0.6, min_ind=0.5,non_poly=FALSE)
+
+pop_elsefilt <- filter_snps(x = pop, maf = 0.05, hf_hets = 0.6, min_ind =  0.8, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE) 
+
+##diversity##
+##
+
+pop_hofilt <- calc_pi(pop_hofilt, "Population")
+pop_hofilt <- calc_ho(pop_hofilt, "Population")
+pop_hofilt <- calc_he(pop_hofilt, "Population")
+pop_hofilt <- calc_private(pop_hofilt, "Population")
+pop_hofilt <- calc_tajimas_d(pop_hofilt, "Population.chromo",sigma=50,step=25)
+stats <- get.snpR.stats(pop_hofilt, "Population", stats = c("pi", "ho", "he")) 
+thetas <- get.snpR.stats(pop_hofilt, "Population.chromo", stats="tajimas_d")
+
+#format and prep for graphics
+basin_divmeans <- stats$weighted.means
+basin_divmeans$ho_aut <- basin_divmeans$weighted_mean_ho / nsnps(pop_hofilt)
+basin_divmeans$he_aut <- basin_divmeans$weighted_mean_he / nsnps(pop_hofilt)
+basin_thetas <- filter(thetas$weighted.means,snp.subfacet==".OVERALL_MEAN")
+
+all_thetas <- thetas$single.window
+all_thetas$wst_persite <- all_thetas$ws.theta / all_thetas$n_snps
+all_thetas$tst_persite <- all_thetas$ts.theta / all_thetas$n_snps
+all_thetas$D <- as.numeric(all_thetas$D)
+mean_thetas <- all_thetas %>% group_by(subfacet) %>% filter(n_snps>1000) %>% summarise(Taj_D=mean(D),mean_ttheta_persite=mean(tst_persite),sd_ttheta_persite=sd(tst_persite),mean_wtheta_persite=mean(wst_persite),sd_wtheta_persite=sd(wst_persite))
+
+#write the summary
+write_delim(mean_thetas,file=paste0(popn,"_mean_diversity_values.txt"),delim="\t",quote="none")
+write_delim(basin_divmeans,file=paste0(popn,"_mean_ho_diversity.txt"),delim="\t",quote="none")
+write_delim(all_thetas,paste0(popn,"thetas_raw.txt"),delim="\t",quote="none")
+write_delim(basin_thetas,paste0(popn,"_mean_tajD.txt"),delim="\t",quote="none")
+
+ts2 <- pivot_longer(all_thetas, cols=c(16,17),values_to="theta", names_to="Theta_Measure")
+ts2$Theta_Measure[ts2$Theta_Measure=="tst_persite"] <- "Tajima's Theta"
+ts2$Theta_Measure[ts2$Theta_Measure=="wst_persite"] <- "Watterson's Theta"
+ylim1 = boxplot.stats(ts2$theta)$stats[c(1, 5)]
+
+ts2 %>% filter(n_snps>1000) %>% ggplot(aes(x=subfacet,y=theta,fill=Theta_Measure)) + geom_boxplot(outlier.alpha=0.01) + coord_cartesian(ylim = ylim1*1.05) + xlab("Population") + ylab("Theta Diversity Value, Sliding Window") + theme_minimal() + theme(axis.text=element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=20)) + fill_palette(c("#2ca25f",	"#99d8c9")) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=20),axis.title=element_text(size=20),legend.text = element_text(size=20),legend.title=element_text(size=20))
+
+ggsave(paste0(popn,"_diversity_thetas_boxplots.png"),device="png",dpi=300)
+
+ts2 %>% filter(n_snps>1000) %>% ggplot(aes(x = theta, y = subfacet, fill = subfacet)) + geom_density_ridges() + theme_ridges(font_size=20,) + theme(legend.position = "none",) + xlab("Per-Site Theta Values") +ylab("Population") + fill_palette(c("#CAB2D6","#8968CD")) + xlim(c(-0.005,0.06)) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=18),axis.title=element_text(size=18),legend.text = element_text(size=18),legend.title=element_text(size=18)) + facet_wrap(facets="Theta_Measure")
+
+ggsave(paste0(popn,"_diversity_thetas_ridgeline.png"),device="png",dpi=300)
+
+
+##calculate smoothed averages##
+sliding_ho <- calc_smoothed_averages(x = pop_hofilt, facets = "Population", sigma = 50, step =25)
+sliding_ho_stats <- get.snpR.stats(sliding_ho, facets="Population",stats=c("ho","pi"))
+single_ho <- sliding_ho_stats$single.window
+single_pi <- sliding_ho_stats$single.window
+#divide by number of interrogated sites for autosomal ho
+single_ho$auto_ho <- single_ho$ho/single_ho$n_snps
+
+single_ho %>% ggplot(aes(x = auto_ho, y = subfacet, fill = subfacet)) + geom_density_ridges() + theme_ridges(font_size=20) + theme(legend.position = "none",text=element_text(family="open sans",size=20)) + xlab("Observed Heterozygosity") +ylab("Population") + fill_palette(c("#CAB2D6","#8968CD")) + xlim(c(0,0.000007))
+
+ggsave(paste0(popn,"_diversity_ho_ridgeline.png"),device="png",dpi=300)
+
+###skip IBD for Rockpools because there are only 2 pops
+##
+
+###Fst
+fst <- calc_pairwise_fst(pop_elsefilt, facets="Population")
+fst2 <- get.snpR.stats(fst,"Population",stats="fst")
+
+plot_pairwise_fst_heatmap(fst,facets="Population",viridis.option="mako",lab_lower=FALSE) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=22,family="open sans"),axis.title=element_text(size=1)) 
+
+ggsave(paste0(popn,"_fst_table.png"),device="png",dpi=300)
+
+rockpools_m <- unique(data.frame("Population"=samp_meta$Population,"long"=samp_meta$long,"lat"=samp_meta$lat))
+d1 <- geodist(rockpools_m,paired=TRUE,measure = "geodesic")
+#turn matrix into pairwise
+colnames(d1) <- rockpools_m$Population
+row.names(d1) <- rockpools_m$Population
+d1 <- as.data.frame(d1)
+xy <- t(combn(colnames(d1), 2))
+dists <- data.frame(xy, dist=d1[xy])
+dists$subfacet <- paste0(dists$X1,"~",dists$X2)
+dists2 <- dists
+dists2$subfacet <- paste0(dists$X2,"~",dists$X1)
+rockpools_dists <- rbind(dists,dists2)
+
+#I want it in km, rather than m, so divide by 1000
+rockpools_dists$dist_km <- dists$dist / 1000
+
+rockpools_fst_dist <- fst2$weighted.means
+rockpools_fst_dist <- left_join(rockpools_fst_dist,rockpools_dists,by="subfacet")
+rockpools_fst_dist$t_geodist <- log(rockpools_fst_dist$dist_km) #take the natural log
+rockpools_fst_dist$t_fst <- rockpools_fst_dist$weighted_mean_fst/(1-rockpools_fst_dist$weighted_mean_fst)
+
+
+###PCA###
+pc <- plot_clusters(pop_elsefilt,facets="Population")
+pca <- pc$data$pca
+popname <- str_to_title(popn)
+ 
+ggplot2::ggplot(pca, aes(PC1, PC2, fill=Population)) + geom_point(shape=21,size=8,stroke=1) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC2 (",pc$pca_loadings[2],"%)")) +ggtitle(paste0("VPFS ",popname, " Intra-Site Analysis: All Loci PC1-PC2")) +fill_palette(c("#CAB2D6","#8968CD")) + theme_minimal() +theme(text=element_text(size=22,family="open sans")) 
+
+ggsave(paste0(popn,"_pca_pc1vpc2.png"),device="png",dpi=300)
+
+ggplot2::ggplot(pca, aes(PC1, PC3, fill=Population)) + geom_point(shape=21,size=8,stroke=1) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC3 (",pc$pca_loadings[3],"%)")) +ggtitle(paste0("VPFS ",popname, " Intra-Site Analysis: All Loci PC1-PC3")) +fill_palette(c("#CAB2D6","#8968CD")) + theme_minimal() +theme(text=element_text(size=22,family="open sans")) 
+
+ggsave(paste0(popn,"_pca_pc1vpc3.png"),device="png",dpi=300)
+
+###reformat for Bayesass###
+pop_morefilt <- filter_snps(x = pop,maf = 0.05, hf_hets = 0.6,min_ind =  0.99, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE)
+
+pop_forbayes <- as.data.frame(pop_morefilt)
+pop_fb_samp <- sample.meta(pop_morefilt)
+pop_fb_snps <- snp.meta(pop_morefilt)
+pop_fb_snps$chr_pos <- paste0(pop_fb_snps$chromo,"_",pop_fb_snps$position)
+rownames(pop_forbayes) <- pop_fb_snps$chr_pos
+colnames(pop_forbayes) <- pop_fb_samp$sample
+pop_forbayes$allele <- rownames(pop_forbayes)
+test2 <- data.frame(pop_forbayes)
+test3 <- pivot_longer(test2, cols=c(1:(ncol(test2)-1)),names_to="sample")
+test4 <- right_join(samp_meta,test3,by="sample")
+test4$a1 <- str_split_i(test4$value,"",1)
+test4$a2 <- str_split_i(test4$value,"",2)
+test4$a1[test4$a1 =="N"] <- 0
+test4$a2[test4$a2 =="N"] <- 0
+test5 <- data.frame("indID"=test4$sample,"PopulationID"=test4$Population,"locID"=test4$allele,"allele1"=test4$a1,"allele2"=test4$a2)
+write_delim(test5,paste0(popn,"_for_ba3_snpr.txt"),delim=" ")
+##
+##njtree
+
+library("ape")
+df2 <- data.frame(pop_elsefilt)
+df3 <- as.data.frame(t(df2))
+row.names(df3) <- sample.meta(pop_elsefilt)$sample
+colnames(df3) <- paste0(snp.meta(pop_elsefilt)$chromo,"_",snp.meta(pop_elsefilt)$position)
+t1 <- df2genind(df3, pop=sample.meta(pop_elsefilt)$Population,ncode=2,NA.char="NN")
+X <- tab(t1, NA.method="mean")
+D <- dist(X)
+tre <- nj(D)
+h2 <- c("#CAB2D6","#8968CD")
+myCol <- h2[as.integer(pop(t1))]
+par(bg = "white",family="open sans")
+plot(tre, type = "unr", show.tip.lab = FALSE)
+tiplabels(col = "black", pch = 21, bg=myCol,cex=3.5)
+poplist <- levels(t1@pop)
+mylegcol <- unique(myCol)
+legend(-20,80,legend=poplist, fill=mylegcol, cex=1, title="Population", bty="n")
+```
+
+
+```{r distfst}
+
+list_of_dists <- mget(ls(pattern="fst_dist"))
+
+local_dist <- rbind(merced_fst_dist,oregon_fst_dist,sac_fst_dist,rockpools_fst_dist)
+
+ggplot(local_dist,aes(x=t_geodist,y=t_fst))+geom_point()+geom_smooth(color="#4a90e2",fill="#a5deba") + theme_pubr() + xlab("Natural Log of Geographic Distance") + ylab("Fst/(1-Fst)") +theme(text = element_text(size = 20, family="open sans"))
+
+ggsave("local_bly_fst_vs_geog.png",device="png",dpi=300)
+
+local_dist$Comparison_Type <- c("Within Site","Between Sites","Between Sites","Between Sites","Between Sites","Between Sites","Between Sites","Between Sites","Between Sites","Between Sites","Between Sites","Within Site","Within Site","Between Sites","Between Sites","Between Sites","Between Sites","Between Sites","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Within Site","Between Sites","Between Sites","Between Sites","Between Sites","Between Sites","Within Site","Within Site")
+
+local_dist %>% filter(dist_km<11) %>% ggplot(aes(x=dist_km,y=weighted_mean_fst,fill=Comparison_Type)) +geom_point(size=8,stroke=1,shape=21) + xlab("Distance (km)") + ylab("Weighted Mean Pairwise Fst") + theme_minimal() + theme(text=element_text(size=20,family="open sans")) + fill_palette(c("#2ca25f",	"#99d8c9"))
+
+ggsave("local_bly_10km_fst_vs_geog.png",device="png",dpi=300)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

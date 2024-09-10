@@ -1,0 +1,645 @@
+---
+title: "VPFS_analyses_2024"
+author: "Shannon Rose Blair"
+date: "2024-08-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+setwd("~/Documents/Documents_Local/shrimp/rad/bly_2024")
+
+library(snpR)
+library(tidyverse)
+library(ggpubr)
+library(ggridges)
+library(geodist)
+library(adegenet)
+library(ape)
+
+```{r import_data}
+
+setwd("~/Documents/Documents_Local/shrimp/rad/bly_2024")
+#import the data for analysis in snpR. Files are a .geno file that has been edited to change the chromo names to replace '.' with '_" ("." throws errors in snpR). Editing was done in vim but you could achieve a similar result with 'sed -i 's/\.1\t/_1\t/g' bly_2024.geno'. Meta is a tab-delimited metadata file in the format SAMPLE POPULATION LAT LONG. "gen" is genotype data in .geno format produced by angsd -doGenos 4. .geno is a tab-delimited text file with two-letter codes for each genotype ("AA" "AG"). There are two header columns produced by -doGenos 4 (add more or reduce with other -doGenos options), CHROMO and POS. The rest of the columns correspond to individuals, and rows correspond to SNP positions.
+
+##snpR requires two metadata files, a sample meta file (see above) and a SNP metadata file which includes chromosome and position. I use the .mafs file produced by angsd as part of the genotype calling, but you could achieve the same result by calling -doGenos 5 (rather than -doGenos 4) in angsd and cutting the first 4 columns of your genos file as your SNP metadata. And for this analysis I don't think you need the major/minor info, so you could technically just use the first two columns of the .geno file.
+
+#read in sample metadata
+samp_meta <- read.delim("bly_2024_meta.txt",header=TRUE)
+
+#read in snp metadata
+sm<- read.delim("bly_2024.mafs")
+snp_meta <- sm[,1:4]
+rm(sm)
+
+#add a column for chromosome_position in the SNP metadata. Ensures that each SNP is uniquely identified without having to call .snp.id
+snp_meta$chr_pos <- paste0(snp_meta$chr,"_",snp_meta$pos)
+
+#import file with the SNPs that passed pcangsd criteria as being under selection.
+sel_snps <- read.table("~/Documents/Documents_Local/shrimp/rad/bly_2024/bly_2024_adaptive_snps.txt", quote="\"", comment.char="")
+
+#import .geno genotype file
+gen <- read.delim("bly_2024.geno", header=FALSE)
+gen <- gen[,3:(ncol(gen)-1)] #remove SNP info columns, plus there's always an extra column at the end of .geno files
+
+#format data as a snpR object
+bly <- import.snpR.data(gen,sample.meta = samp_meta,snp.meta = snp_meta ,mDat = "NN")
+bly <- bly[sample=-"SH1_001"] #removing a problem sample
+
+```
+
+
+
+
+```{r filter}
+#filtering SNPs, the first round is called _hofilt because it's for calculating autosomal heterozygosity and thetas, using both polymorphic and non-polymorphic sites.
+bly_hofilt <- filter_snps(x=bly, hf_hets = 0.6, min_ind=0.5,non_poly=FALSE, bi_al=TRUE,)
+
+#the second round of filtering is called _elsefilt because it's used for everything else. It retains only biallelic polymorphic sites (minor allele frequency >=0.05) present in at least 80% of samples.
+bly_elsefilt <- filter_snps(x = bly, maf = 0.05, hf_hets = 0.6, min_ind =  0.8, min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE) 
+
+#remove one site that didn't have enough samples
+bly_hofilt <- bly_hofilt[Population=-StoneCorral]
+bly_elsefilt <- bly_elsefilt[Population=-StoneCorral]
+
+```
+
+
+```{r diversity}
+setwd("~/Documents/Documents_Local/shrimp/rad/bly_2024")
+#we will start by calculating ho, he, private alleles and tajima's D (including tajima's and watterson's thetas) for each population. Thetas are calculated in a sliding window, but Ho/He are calculated globally for each population.
+bly_hofilt <- calc_ho(bly_hofilt, "Population")
+bly_hofilt <- calc_he(bly_hofilt, "Population")
+bly_hofilt <- calc_private(bly_hofilt, "Population")
+bly_hofilt <- calc_tajimas_d(bly_hofilt, "Population.chromo",sigma=50,step=25)
+
+#retrieve the stats you just calculated
+stats <- get.snpR.stats(bly_hofilt, "Population", stats = c("ho", "he","private")) 
+thetas <- get.snpR.stats(bly_hofilt, "Population.chromo", stats="tajimas_d")
+
+#format the diversity weighted means as a table
+pop_divmeans <- stats$weighted.means
+pop_thetas <- thetas$single.window
+#calculate the autosomal heterozygosity by dividing by the number of interrogated sites
+pop_divmeans$ho_aut <- pop_divmeans$weighted_mean_ho / nsnps(bly_hofilt)
+pop_divmeans$he_aut <- pop_divmeans$weighted_mean_he / nsnps(bly_hofilt)
+
+#correct the thetas by dividing by the number of interrogated sites per window
+pop_thetas$wst_persite <- pop_thetas$ws.theta/ pop_thetas$n_snps
+pop_thetas$tst_persite <- pop_thetas$ts.theta /pop_thetas$n_snps
+
+
+write_delim(pop_thetas,paste0("bly_2024","_snp_thetas_raw.txt"),delim="\t",quote="none")
+
+#to get the means table, we filter sites to retain only those with >1000 sites evaluated (try this at different levels and see what happens), then take averages for each population. However, we also present the raw data.
+pop_thetas$D <- as.numeric(pop_thetas$D)
+mean_thetas <- pop_thetas %>% group_by(subfacet) %>% filter(n_snps>1000) %>% summarise(Taj_D=mean(D),mean_ttheta_persite=mean(tst_persite),sd_ttheta_persite=sd(tst_persite),mean_wtheta_persite=mean(wst_persite),sd_wtheta_persite=sd(wst_persite))
+
+write_delim(mean_thetas,paste0("bly_2024","_snp_thetameans.txt"),delim="\t",quote="none")
+
+write_delim(pop_divmeans,paste0("bly_2024","_snp_divmeans.txt"),delim="\t",quote="none")
+
+#now to plot, start with thetas boxplots
+#pivot so boxplots can be faceted
+ts2 <- pivot_longer(pop_thetas, cols=c(16,17),values_to="theta", names_to="Theta_Measure")
+
+#make labels nicer
+ts2$Theta_Measure[ts2$Theta_Measure=="tst_persite"] <- "Tajima's Theta"
+ts2$Theta_Measure[ts2$Theta_Measure=="wst_persite"] <- "Watterson's Theta"
+
+#fix the ylim to exclude some wild outliers - remember, these are sliding windows
+ylim1 = boxplot.stats(ts2$theta)$stats[c(1, 5)]
+
+
+
+#add sorting info, ugh 
+sm2 <- read.delim("~/Documents/Documents_Local/shrimp/rad/bly_2024/bly_2024_population_meta.txt") #get population-level metadata sheet
+ts3 <- left_join(ts2,sm2,by="subfacet") #join metadata to diversity data to arrange nicely on the plot 
+names(ts3)[names(ts3)=='subfacet'] <- "Population"
+#re-level the factors and then plot the boxplot. The first argument is the data, the second is the boxplot call, the third sets the ylim to avoid crunching the plot due to some extreme outliers. All the rest are aesthetic.
+ts3 %>% arrange(lat) %>% filter(n_snps>1000) %>% mutate(Population=factor(Population, levels=rev(unique(Population)))) %>% ggplot(aes(x=Population,y=theta,fill=Theta_Measure)) + geom_boxplot(outlier.alpha=0.01) + coord_cartesian(ylim = ylim1*1.05) + xlab("Population") + ylab("Theta Diversity Value, Sliding Window") + theme_minimal() + theme(axis.text=element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=20)) + fill_palette(c("#2ca25f",	"#99d8c9")) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=20),axis.title=element_text(size=20),legend.text = element_text(size=20),legend.title=element_text(size=20))
+
+ggsave("bly_2024_thetas_boxplots.svg",device="svg",dpi=300)
+
+ggplot(ts3, aes(x=valley,y=theta,fill=Theta_Measure)) + geom_boxplot(outlier.shape=NA) + xlab("Valley") + ylab("Theta Diversity Value, Sliding Window") + theme_minimal() + theme(axis.text=element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=20,family="open sans")) + fill_palette(c("#2ca25f",	"#99d8c9")) + theme(element_text(size=20), axis.text = element_text(size=20),axis.title=element_text(size=20),legend.text = element_text(size=20),legend.title=element_text(size=20)) +ylim(c(0,0.07))
+
+ggsave("bly_2024_diversity_by_valley.svg",device="svg",dpi=300)
+
+##now the thetas ridge plots
+ts3 %>% arrange(lat) %>% filter(n_snps>1000) %>% mutate(Population=factor(Population, levels=unique(Population))) %>% ggplot(aes(x = theta, y = Population, fill = Population)) + geom_density_ridges() + theme_ridges(font_size=20,) + theme(legend.position = "none",) + xlab("Per-Site Theta Values") +ylab("Population") + fill_palette(rev(c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373"))) + xlim(c(-0.005,0.06)) + theme(text=element_text(size=20,family="open sans"), axis.text = element_text(size=18),axis.title=element_text(size=18),legend.text = element_text(size=18),legend.title=element_text(size=18)) + facet_wrap(facets="Theta_Measure")
+
+ggsave("bly_2024_theta_faceted_ridgeline_plot.svg",dpi=200,device="svg")
+
+
+###now we make the ho/he ridgeline plots. Because Ho/He were calculated by population, now we want to calculate by individual. Might have been better to do this in sliding window but probably would take too long. This is just het rate per ind. Didn't do pi because pi with sample size=1 is essentially equal to het rate per ind.
+
+
+sliding_ho <- calc_smoothed_averages(x = bly_hofilt, facets = "Population", sigma = 50, step =25)
+sliding_ho_stats <- get.snpR.stats(sliding_ho, facets="Population",stats=c("ho","he","pi"))
+single_ho <- sliding_ho_stats$single.window
+single_pi <- sliding_ho_stats$single.window
+#divide by number of interrogated sites for autosomal ho
+single_ho$auto_ho <- single_ho$ho/single_ho$n_snps
+
+#add sorting info, ugh 
+sm2 <- read_delim("bly_2024_population_meta.txt") #get population-level metadata sheet
+colnames(sm2) <- c("Population","lat","long","valley")
+names(single_ho)[names(single_ho)=='subfacet'] <- "Population" #fix colnames so you can join
+single_ho2 <- left_join(single_ho,sm2,by="Population") #join metadata to diversity data to arrange nicely on the plot 
+write_delim(single_ho2,"bly_2024_ho_he_pi_sliding_window.txt",delim="\t",quote="none")
+
+single_ho2$auto_he <- single_ho2$he / single_ho2$n_snps
+summ_hos <- single_ho2 %>% group_by(Population) %>% summarise("mean_ho"=mean(ho),"sd_ho"=sd(ho),"mean_autoho"=mean(auto_ho),"sd_autoho"=sd(auto_ho),"mean_he"=mean(he),"sd_he"=sd(he),"mean_auto_he"=mean(auto_he),"sd_autohe"=sd(auto_he))
+
+write_delim(summ_hos,"bly_2024_ho_sliding_means.txt",delim="\t",quote="none")
+
+single_ho2 %>% arrange(lat) %>%  mutate(Population=factor(Population, levels=unique(Population))) %>% ggplot(aes(x = auto_ho, y = Population, fill = Population)) + geom_density_ridges() + theme_ridges(font_size=20) + theme(legend.position = "none",text=element_text(family="open sans",size=20)) + xlab("Observed Heterozygosity") +ylab("Population") + fill_palette(rev(c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373"))) + xlim(c(0,0.000007))
+
+ggsave("bly_2024_ho_ridgeplot.svg",device="svg",dpi=400)
+
+
+```
+
+
+```{r PCA}
+setwd("~/Documents/Documents_Local/shrimp/rad/bly_2024/")
+#use_font("montserrat", "~/Documents/Documents_Local/shrimp/rad/bly_2024/www/css/montserrat.css")
+#next we generate PCAs for our full dataset and our selected and neutral datasets
+
+#first filter SNPs by whether they are in our selected SNPs from PCAdapt, which we laoded in earlier
+bly_sel <- bly_elsefilt[chr_pos = c(sel_snps$V1)]
+bly_neut <- bly_elsefilt[chr_pos = -c(sel_snps$V1)]
+
+#plot PCs
+pc <- plot_clusters(bly_elsefilt,facets="Population")
+pc_sel <- plot_clusters(bly_sel,facets="Population")
+pc_neut <- plot_clusters(bly_neut,facets="Population")
+
+pca <- pc$data$pca
+pca_sel <- pc_sel$data$pca
+pca_neut <- pc_neut$data$pca
+
+#fix the legend order and the names
+newl<-pca[order(pca$lat, decreasing=TRUE),]
+Populations <- unique(newl$Population)
+pca$Population <- factor(pca$Population, levels=Populations)
+names(pca)[names(pca) == 'Population'] <- 'Population'
+newl_sel<-pca_sel[order(pca_sel$lat, decreasing=TRUE),]
+newl_neut<-pca_neut[order(pca_neut$lat, decreasing=TRUE),]
+Populations_sel <- unique(newl_sel$Population)
+Populations_neut <- unique(newl_neut$Population)
+pca_sel$Population <- factor(pca_sel$Population, levels=Populations_sel)
+pca_neut$Population <- factor(pca_neut$Population, levels=Populations_neut)
+names(pca_sel)[names(pca_sel) == 'Population'] <- 'Population'
+names(pca_neut)[names(pca_neut) == 'Population'] <- 'Population'
+
+#plot selected PCA
+ggplot(pca_sel, aes(PC1, PC2, fill=Population)) + geom_point(shape=21,size=8,stroke=1)+fill_palette(c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373")) +xlab(paste0("PC1 (",pc_sel$pca_loadings[1],"%)")) + ylab(paste0("PC2 (",pc_sel$pca_loadings[2],"%)")) +ggtitle("VPFS Loci Putatively Under Selection PC1-PC2") +theme_minimal() + theme(text = element_text(size = 22))
+
+ggsave("bly_2024_selected_pca_pc1vpc2.svg",device="svg",dpi=300)
+
+
+#plot neutral PCA
+ggplot2::ggplot(pca_neut, aes(PC1, PC2, fill=Population)) + geom_point(shape=21,size=8,stroke=1)+fill_palette(c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373")) + xlab(paste0("PC1 (",pc_neut$pca_loadings[1],"%)")) + ylab(paste0("PC2 (",pc_neut$pca_loadings[2],"%)"))  +ggtitle("VPFS Putatively Neutral Loci PC1-PC2")+theme_minimal() +theme(text = element_text(size = 22,family="open sans"))
+
+ggsave("bly_2024_neutral_pca_pc1vpc2.svg",device="svg",dpi=300)
+
+# plot full PC1_PC2
+
+ggplot(pca, aes(PC1, PC2, fill=Population)) + geom_point(shape=21,size=8,stroke=1)+fill_palette(c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373")) +xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC2 (",pc$pca_loadings[2],"%)")) +ggtitle("VPFS All Loci PC1-PC2") + theme_minimal() + theme(text=element_text(size=22,family="open sans"), axis.text = element_text(size=22),axis.title=element_text(size=22),legend.text = element_text(size=22),legend.title=element_text(size=22))
+
+ggsave("bly_2024_pca_pc1vpc2_bigger.svg",device="svg",dpi=300)
+
+#PC1-PC3
+ggplot(pca, aes(PC1, PC3, fill=Population)) + geom_point(shape=21,size=8,stroke=1)+fill_palette(c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373")) + xlab(paste0("PC1 (",pc$pca_loadings[1],"%)")) + ylab(paste0("PC3 (",pc$pca_loadings[3],"%)"))  +ggtitle("VPFS All Loci PC1-PC3") + theme_minimal() +  theme(text=element_text(family="open sans",size=22), axis.text = element_text(size=22),axis.title=element_text(size=22),legend.text = element_text(size=22),legend.title=element_text(size=22))
+
+ggsave("bly_2024_pca_pc1vpc3_opensans.svg",device="svg",dpi=300)
+```
+
+```{r fst_and_ibd}
+
+#calculate ibd and make sure we calc/get geographic distance
+bly2 <- calc_isolation_by_distance(
+  bly_elsefilt,
+  facets = "Population",
+  x_y = c("long", "lat"),
+  genetic_distance_method = "Edwards",
+  interpolate = "bernoulli",
+)
+
+ibd <- get.snpR.stats(bly2, "Population", stats=c("isolation_by_distance"))
+
+#get geodists in km, reorder meta from above
+sm3<-data.frame("Population"=sm2$Population,"lon"=sm2$long,"lat"=sm2$lat)
+#use geo_dist library to get geo distances in m
+d1 <- geodist(sm3,paired=TRUE,measure = "geodesic")
+#turn matrix into pairwise
+colnames(d1) <- sm3$Population
+row.names(d1) <- sm3$Population
+d1 <- as.data.frame(d1)
+xy <- t(combn(colnames(d1), 2))
+dists <- data.frame(xy, dist=d1[xy])
+dists$subfacet <- paste0(dists$X1,"~",dists$X2)
+dists2 <- dists
+dists2$subfacet <- paste0(dists$X2,"~",dists$X1)
+dists3 <- rbind(dists,dists2)
+
+#I want it in km, rather than m, so divide by 1000
+dists3$dist_km <- dists$dist / 1000
+
+#calculat Fst
+fst <- calc_pairwise_fst(bly_elsefilt, facets="Population")
+fst2 <- get.snpR.stats(fst,"Population",stats="fst")
+
+#plot fst heatmap
+plot_pairwise_fst_heatmap(fst,facets="Population",facet.order = c("Oregon","Meridian","BealeAFB","Kiefer","Cook","Werre","Triangle","Rockpools","UCMerced","Dutchman","CrossCreek","FHL","Pixley","SkunkHollow"),viridis.option="mako",lab_lower=TRUE) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(text=element_text(size=22,family="open sans"),axis.title=element_text(size=1)) + geom_label(ggplot2::aes(label = round(weighted_mean_fst, 3), x = p2, y = p1), fill = "white",size=7, family="open sans")
+
+ggsave("bly_2024_fst_table_lab_lower.svg",device="svg",dpi=300)
+
+##assess fst vs distance 
+fst_dist1 <- fst2$weighted.means
+fst_dist1 <- left_join(fst_dist1,dists3,by="subfacet")
+fst_dist1$t_geodist <- log(fst_dist1$dist_km) #take the natural log
+fst_dist1$t_fst <- fst_dist1$weighted_mean_fst/(1-fst_dist1$weighted_mean_fst)
+
+ggplot(fst_dist1,aes(x=t_geodist,y=t_fst))+geom_point()+geom_smooth(color="#4a90e2",fill="#a5deba") + theme_pubr() + xlab("Natural Log of Geographic Distance") + ylab("Fst/(1-Fst)") +theme(text = element_text(size = 20, family="open sans"))
+
+ggsave("bly_2024_fst_vs_geog.svg",device="svg",dpi=300)
+
+#just plot the un-transformed values, for interest mostly
+ggplot(fst_dist1,aes(x=dist_km,y=weighted_mean_fst))+geom_point()+geom_smooth(color="#4a90e2",fill="#a5deba") + theme_pubr() + xlab("Geographic Distance (km)") + ylab("Fst")
+
+ggsave("bly_2024_fst_vs_geog_notransform.svg",device="svg",dpi=500)
+
+```
+
+```{R format_ba3}
+
+#we want to re-filter and format for bayesass (BA3) analysis next. We don't need very many SNPs for this, and in fact with this many populations we can't run very many. 650 SNPs takes something like 3 days to run on 24G memory, and I'm not convinced it multithreads very well. This refilters at 95% minInd to keep the most highly-genotyped SNPs.
+
+bly_morefilt <- filter_snps(x = bly, maf = 0.05, hf_hets = 0.6,min_ind =  0.95,min_loci = 0.5, re_run = "partial", non_poly = TRUE, bi_al = TRUE) 
+
+#this is all just formatting to get it into BA3 format. PGDSpider has a method to transform that might be easier than this, but I haven't been able to get my .jar to work for a while and it looks like the web start version is offline.
+bly_forbayes <- as.data.frame(bly_morefilt)
+bly_fb_samp <- sample.meta(bly_morefilt)
+bly_fb_snps <- snp.meta(bly_morefilt)
+bly_fb_snps$chr_pos <- paste0(bly_fb_snps$chromo,"_",bly_fb_snps$position)
+rownames(bly_forbayes) <- bly_fb_snps$chr_pos
+colnames(bly_forbayes) <- bly_fb_samp$sample
+bly_forbayes$allele <- rownames(bly_forbayes)
+test2 <- data.frame(bly_forbayes)
+test3 <- pivot_longer(test2, cols=c(1:110),names_to="sample")
+test4 <- right_join(samp_meta,test3,by="sample")
+test4$a1 <- str_split_i(test4$value,"",1)
+test4$a2 <- str_split_i(test4$value,"",2)
+test4$a1[test4$a1 =="N"] <- 0
+test4$a2[test4$a2 =="N"] <- 0
+test5 <- data.frame("indID"=test4$sample,"PopulationID"=test4$Population,"locID"=test4$allele,"allele1"=test4$a1,"allele2"=test4$a2)
+write_delim(test5,"bly_2024_for_ba3_snpr.txt",delim=" ")
+```
+
+```{r njtree}
+#prep data for import into adegenet/ape
+df2 <- data.frame(bly_elsefilt)
+df3 <- as.data.frame(t(df2))
+row.names(df3) <- sample.meta(bly_elsefilt)$sample
+colnames(df3) <- paste0(snp.meta(bly_elsefilt)$chromo,"_",snp.meta(bly_elsefilt)$position)
+t1 <- df2genind(df3, pop=sample.meta(bly_elsefilt)$Population,ncode=2,NA.char="NN")
+X <- tab(t1, NA.method="mean")
+D <- dist(X)
+tre <- nj(D)
+h2 <- c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373")
+myCol <- h2[as.integer(pop(t1))]
+par(bg = "white",cex=0.8, family="open sans")
+plot(tre, type = "unr", show.tip.lab = FALSE)
+tiplabels(col = "black", pch = 21, bg=myCol,cex=3.5)
+poplist <- c("Oregon", "Meridian", "BealeAFB", "Kiefer", "Cook", "Werre", "Triangle","Rockpools", "UCMerced", "Dutchman", "CrossCreek", "Pixley", "FHL", "SkunkHollow")
+mylegcol <- unique(myCol)
+legend(-30,90,legend=poplist, fill=mylegcol, cex=1.5, title="Population", bty="n")
+
+#don't ggsave this one (because we aren't using ggplot to plot it)
+
+```
+
+```{rda}
+
+###IMPORTANT: THIS SECTION WAS BASED ON CAPBLANCQ AND FORESTER'S RDA TUTORIAL, AND MUCH OF THE CODE IS THEIRS. It has been modified to fit my data. The link to the tutorial is here: https://github.com/Capblancq/RDA-landscape-genomics
+
+#and the paper citation is: Thibaut Capblancq & Brenna Forester (2021). Redundancy Analysis: A Swiss army knife for landscape genomics. Methods in Ecology and Evolution 12(12): 2298-2309. (https://doi.org/10.1111/2041-210X.13722)
+
+#the paper citation for the rdadapt function is Capblancq T, Luu K, Blum MGB, Bazin E. Evaluation of redundancy analysis to identify signatures of local adaptation. Mol Ecol Resour. 2018; 18: 1223–1233. https://doi.org/10.1111/1755-0998.12906
+
+#prep RDA genotypes. These are merged genotypes because all samples have the same environmental variables.
+
+#the call was:
+#loc=population
+#need lists of population-level bamfiles
+#samtools merge -b ${loc}.bamlist > -o ${loc}_merged.bam
+#ls *_merged.bam > bly_2024_merged.bamlist
+#angsd -b bly_2024_merged.bamlist -P 1 -ref brly_pg_assembly_filtered.fasta -anc brly_pg_assembly_filtered.fasta -rf bly_2024_filtered_loci.txt -gl 2 -dopost 2 -domajorminor 1 -domaf 1 --ignore-RG 0 -doGlf 2 -minMapQ 10 -minQ 20 -dogeno 4 -setMinDepth ${mindepth} -docounts 1 -geno_minDepth 8 -postCutoff 0.95 -snp_pval 1 -out ${out}/bly_2024_merged
+
+#then just download and unzip the genos file
+
+bly2 <- read.delim("~/Documents/Documents_Local/shrimp/rad/bly_2024/bly_2024_merged.geno", header=FALSE)
+bly2 <- bly2[-ncol(bly2)]
+colnames(bly2) <- c("chrom","pos","BealeAFB","Rockpools","CrossCreek","Cook","Dutchman","FHL","Kiefer","Meridian","Oregon","Pixley","StoneCorral","SkunkHollow","Triangle","UCMerced","Werre")
+bly2$chrom <- str_split_fixed(bly2$chrom,"_",3)[,2]
+bly2$chrom_pos <- paste0(bly2$chrom,"_",bly2$pos)
+bly2 <- bly2[,-13]
+bly2 <- data.frame("chrom"=bly2$chrom,"pos"=bly2$pos,"Oregon"=bly2$Oregon,"Meridian"=bly2$Meridian,"BealeAFB"=bly2$BealeAFB,"Kiefer"=bly2$Kiefer,"Cook"=bly2$Cook,"Werre"=bly2$Werre,"Triangle"=bly2$Triangle,"Rockpools"=bly2$Rockpools,"UCMerced"=bly2$UCMerced,"Dutchman"=bly2$Dutchman,"CrossCreek"=bly2$CrossCreek,"FHL"=bly2$FHL,"Pixley"=bly2$Pixley,"SkunkHollow"=bly2$SkunkHollow,"chrom_pos"=bly2$chrom_pos)
+#double check that only sites from our unliked site list are included##
+site_list <- read.delim("~/Documents/Documents_Local/shrimp/rad/bly_2024/bly_2024_adaptive_snps.txt", header=FALSE)
+colnames(site_list) <- "chrom_pos"
+#site_list$chrom <- str_split_fixed(site_list$chrom,"_",3)[,2]
+#site_list$chrom_pos <- paste0(site_list$chrom,"_",site_list$pos)
+
+bly_sel <- subset(bly2, chrom_pos %in% site_list$chrom_pos)
+bly_neu <- subset(bly2, !(chrom_pos %in% site_list$chrom_pos))
+##transpose and reformat for rda, neutral first#
+blyt <- t(bly_neu)
+colnames(blyt) <- blyt[nrow(blyt),]
+blyt <- blyt[-nrow(blyt),]
+blyt <- blyt[-1,]
+blyt <- blyt[-1,]
+bly_n <- as.data.frame(blyt)
+
+##transpose and reformat selected##
+blyt <- t(bly_sel)
+colnames(blyt) <- blyt[nrow(blyt),]
+blyt <- blyt[-nrow(blyt),]
+blyt <- blyt[-1,]
+blyt <- blyt[-1,]
+bly_s <- as.data.frame(blyt)
+
+##load climat values##
+clim <- read.delim("~/Documents/Documents_Local/shrimp/rad/bly_2024/bly_climvals_for_test.txt")
+row.names(clim) <-clim$CLUSTER
+identical(rownames(bly_s), rownames(clim)) 
+
+##test correlations among our best climate candidates##
+bly_corr <- clim[,3:12]
+ggpairs(bly_corr)
+ggsave("bly_2024_aug2024_full_corrplot.svg",device="svg",dpi=400)
+
+##drop highly correlated values#
+cols_to_keep <- c(5,7,8,9,10)
+pred <- clim[,cols_to_keep]
+pred <- sapply(pred, as.numeric )
+
+Env <- scale(pred, center=TRUE, scale=TRUE)
+scale_env <- attr(Env, 'scaled:scale')
+center_env <- attr(Env, 'scaled:center')
+
+## Climatic table
+Env <- as.data.frame(Env)
+row.names(Env) <- c(clim$CLUSTER)
+
+#need to transform our AA/GG into 01 etc
+Neutral <- bly_n
+names_ind_neutral <- row.names(Neutral)
+Neutral[Neutral=="NN"] <- NA
+Neut2 <- data.frame(row.names=row.names(Neutral))
+for (i in 1:ncol(Neutral)) {
+  levn2 <- levels(as.factor(Neutral[,i]))
+  n2 <- Neutral[,i]
+  if (length(levn2)==3) {
+    n2[n2==levn2[1]] <- 0
+    n2[n2==levn2[2]] <- 1
+    n2[n2==levn2[3]] <- 2
+  } else if (length(levn2)==1) {
+    a1 <- str_split_i(levn2[1],"",1)
+    a2 <- str_split_i(levn2[1],"",2)
+    if (a1==a2) {
+      n2[n2==levn2[1]] <- 0
+    } else {
+      n2[n2==levn2[1]] <- 1
+    }
+  } else if (length(levn2)==2) {
+    a1 <- str_split_i(levn2[1],"",1)
+    a2 <- str_split_i(levn2[1],"",2)
+    a3 <- str_split_i(levn2[2],"",1)
+    a4 <- str_split_i(levn2[2],"",2)
+    if ((a1==a2) & (a3==a4)) {
+      n2[n2==levn2[1]] <- 0
+      n2[n2==levn2[2]] <- 2
+    } else if (a1!=a2) {
+      n2[n2==levn2[1]] <- 1
+      n2[n2==levn2[2]] <- 0
+    } else {
+      n2[n2==levn2[1]] <- 0
+      n2[n2==levn2[2]] <- 1
+    }
+  }
+  Neut2[,i] <- as.numeric(n2)
+}
+colnames(Neut2) <- colnames(Neutral)
+
+#need to interpolate missing data so we can make our neutral PCA. We don't have much since these are merged bams
+colnames(Neut2) <- colnames(Neutral)
+AllFreq_neutral <- Neut2
+for (i in 2:ncol(AllFreq_neutral)){
+  AllFreq_neutral[which(is.na(AllFreq_neutral[,i])),i] <- median(AllFreq_neutral[-which(is.na(AllFreq_neutral[,i])),i], na.rm=TRUE)
+}
+
+#make neutral PCA, plot it with a biplot (just to see)
+pca <- rda(AllFreq_neutral[,-1], scale=T)
+biplot(pca,display = c("sites", "species"),type = "points")
+screeplot(pca, main="Eigenvalues of principal component axes") #show three strong PCs, so we use 1:3 below for our PC choices
+PCs <- scores(pca, choices=c(1:3), display="sites", scaling=0)
+PopStruct <- data.frame(Population = row.names(AllFreq_neutral), PCs)
+colnames(PopStruct) <- c("CLUSTER", "PC1", "PC2","PC3")
+
+#attach climate and PC values
+bly_phen_all <- inner_join(clim, PopStruct, by="CLUSTER")
+
+#process the selected loci similarly to the neutral
+Genotypes <- bly_s
+names_ind <- row.names(Genotypes)
+Genotypes[Genotypes=="NN"] <- NA
+Gen2 <- data.frame(row.names=row.names(Genotypes))
+
+#do the same changing of genotypes from AA/GG for our selected
+for (i in 1:ncol(Genotypes)) {
+  levn2 <- levels(as.factor(Genotypes[,i]))
+  n2 <- Genotypes[,i]
+  if (length(levn2)==3) {
+    n2[n2==levn2[1]] <- 0
+    n2[n2==levn2[2]] <- 1
+    n2[n2==levn2[3]] <- 2
+  } else if (length(levn2)==1) {
+    a1 <- str_split_i(levn2[1],"",1)
+    a2 <- str_split_i(levn2[1],"",2)
+    if (a1==a2) {
+      n2[n2==levn2[1]] <- 0
+    } else {
+      n2[n2==levn2[1]] <- 1
+    }
+  } else if (length(levn2)==2) {
+    a1 <- str_split_i(levn2[1],"",1)
+    a2 <- str_split_i(levn2[1],"",2)
+    a3 <- str_split_i(levn2[2],"",1)
+    a4 <- str_split_i(levn2[2],"",2)
+    if ((a1==a2) & (a3==a4)) {
+      n2[n2==levn2[1]] <- 0
+      n2[n2==levn2[2]] <- 2
+    } else if (a1!=a2) {
+      n2[n2==levn2[1]] <- 1
+      n2[n2==levn2[2]] <- 0
+    } else {
+      n2[n2==levn2[1]] <- 0
+      n2[n2==levn2[2]] <- 1
+    }
+  }
+  Gen2[,i] <- as.numeric(n2)
+}
+colnames(Gen2) <- colnames(Genotypes)
+AllFreq <- Gen2
+na_pop <- apply(AllFreq[,-1], 2, function(x) sum(is.na(x)))
+AllFreq <- AllFreq[,(which(na_pop<2)+1)]
+for (i in 1:ncol(AllFreq)){
+  AllFreq[which(is.na(AllFreq[,i])),i] <- median(AllFreq[-which(is.na(AllFreq[,i])),i], na.rm=TRUE)
+}
+
+#also remove loci with maf <0.05 or >0.95
+freq_mean <- colMeans(AllFreq)
+AllFreq <- AllFreq[,-which(freq_mean>=0.95 | freq_mean<=0.05)]
+
+#the first four columns are our sample metadata, ie, "sample name" (placeholder), population name, latitude and longitude
+bly_phen_info <- bly_phen_all[,1:4]
+bly_phen_PCs <- bly_phen_all[,13:15] #the last three columns are our PCs
+#we want to insert our scaled/centered data for our selected variables in the middle, right now it's all our climate data
+bly_phen_all <- cbind(bly_phen_info,Env,bly_phen_PCs)
+
+#make a corrplot with our PCs
+bly_corr <- bly_phen_all[,3:12]
+ggpairs(bly_corr)
+ggsave("~/Documents/Documents_Local/shrimp/rad/bly_2024/bly_2024_rda_aug2024_corrplot_w3pcs.svg", device="svg")
+
+#still a lot of correlation, which will depress our true signature. 
+
+#this is the full RDA, making the table now
+pRDAfull <- rda(AllFreq ~ PC1 + PC2 + PC3+ LONG + LAT + AMT + PWQ + MDR + TAR + elevation, bly_phen_all)
+RsquareAdj(pRDAfull)
+fullan <- anova(pRDAfull)
+fullan
+
+#now we condition the non-climate variables (PCs and lat/long) to get our climate-only RDA
+pRDAclim <- rda(AllFreq ~ AMT + PWQ + MDR + TAR +elevation + Condition(PC1 + PC2 + PC3 +LONG + LAT),  bly_phen_all)
+RsquareAdj(pRDAclim)
+climan <- anova(pRDAclim)
+climan
+
+#now we condition climate + geography to get our structure-only RDA
+pRDAstruct <- rda(AllFreq ~ PC1 + PC2 + PC3+ Condition(LONG + LAT+ AMT + PWQ + MDR + TAR + elevation),  bly_phen_all)
+RsquareAdj(pRDAstruct)
+structan <- anova(pRDAstruct)
+structan
+
+#now we condition structure+climate to get our geography-only RDA
+pRDAgeog <- rda(AllFreq ~ LONG + LAT + Condition(PC1 + PC2 + PC3+ AMT + elevation + first_rainday + PDM),  bly_phen_all)
+RsquareAdj(pRDAgeog)
+geogan <- anova(pRDAgeog)
+geogan
+
+#our final RDA, it's actually the same as our climate-only RDA
+RDA_env <- rda(AllFreq ~  AMT + MDR + TAR + PWQ + elevation + Condition(PC1 + PC2 + PC3+ LONG + LAT),  bly_phen_all)
+screeplot(RDA_env, main="Eigenvalues of constrained axes")
+
+#find outliers
+source("~/Downloads/RDA-landscape-genomics-main/src/rdadapt.R")
+rdadapt_env<-rdadapt(RDA_env, 3) #using three RDA axes, we are not outlier-rich
+thres_env <- 0.01/length(rdadapt_env$p.values) #set a discovery rate threshold
+outliers <- data.frame(Loci =colnames(AllFreq)[which(rdadapt_env$p.values<thres_env)], p.value = rdadapt_env$p.values[which(rdadapt_env$p.values<thres_env)], contig = unlist(lapply(str_split_fixed(colnames(AllFreq)[which(rdadapt_env$p.values<thres_env)],"_",2)[,1], function(x) x[1]))) #make a dataframe of SNPs passing the filters
+
+outliers <- outliers[order(outliers$contig, outliers$p.value),] #order by contig
+
+## List of outlier names
+outliers_rdadapt_env <- as.character(outliers$Loci[!duplicated(outliers$contig)])
+
+#this is just for plotting, taken exactly from Brenna & Thibaut's tutorial
+locus_scores <- scores(RDA_env, choices=c(1:2), display="species", scaling="none") # vegan references "species", here these are the loci
+TAB_loci <- data.frame(names = row.names(locus_scores), locus_scores)
+TAB_loci$type <- "Neutral"
+TAB_loci$type[TAB_loci$names%in%outliers$Loci] <- "All outliers"
+TAB_loci$type[TAB_loci$names%in%outliers_rdadapt_env] <- "Top outliers"
+TAB_loci$type <- factor(TAB_loci$type, levels = c("Neutral", "All outliers", "Top outliers"))
+TAB_loci <- TAB_loci[order(TAB_loci$type),]
+TAB_var <- as.data.frame(scores(RDA_env, choices=c(1,2), display="bp")) # pull the biplot scores
+
+#plot call
+ggplot() +
+  geom_hline(yintercept=0, linetype="dashed", color = gray(.80)) +
+  geom_vline(xintercept=0, linetype="dashed", color = gray(.80)) +
+  geom_point(data = TAB_loci, aes(x=RDA1*20, y=RDA2*20, fill = type,alpha=type), size = 5, shape=21) +
+  scale_fill_manual(values = c("gray90", "#4a90e2", "#a5deba")) +
+  geom_segment(data = TAB_var, aes(xend=RDA1, yend=RDA2, x=0, y=0), colour="black", size=0.25, linetype=1, arrow=arrow(length = unit(0.02, "npc"))) +
+  geom_text(data = TAB_var, aes(x=1.1*RDA1, y=1.1*RDA2, label = row.names(TAB_var)), size = 3.5, family = "Arial") +
+  xlab("RDA 1") + ylab("RDA 2") +
+  facet_wrap(~"RDA space") +
+  guides(color=guide_legend(title="Locus type")) +
+  theme_bw() +
+  theme(panel.background = element_blank(), legend.background = element_blank(), panel.grid = element_blank(), plot.background = element_blank(), legend.text=element_text(size=rel(.8)), strip.text = element_text(size=20),text=element_text(family="open sans",size=20))
+        
+ggsave("bly_2024_aug2024_rda_outliers_scatter.svg",device="svg",dpi=400)
+
+#the same loci but plotted as a manhattan. Again I just tweaked some aesthetic variables, this code is all Brenna & Thibaut's.
+Outliers <- rep("Neutral", length(colnames(AllFreq)))
+Outliers[colnames(AllFreq)%in%outliers$Loci] <- "All outliers"
+Outliers[colnames(AllFreq)%in%outliers_rdadapt_env] <- "Top outliers"
+Outliers <- factor(Outliers, levels = c("Neutral", "All outliers", "Top outliers"))
+TAB_manhatan <- data.frame(pos = 1:length(colnames(AllFreq)), 
+                           pvalues = rdadapt_env$p.values, 
+                           Outliers = Outliers)
+TAB_manhatan <- TAB_manhatan[order(TAB_manhatan$Outliers),]
+ggplot(data = TAB_manhatan) +
+  geom_point(aes(x=pos, y=-log10(pvalues), fill = Outliers), size=3.4,shape=21,stroke=0.5) +
+  scale_fill_manual(values = c("gray90", "#4a90e2", "#a5deba")) +
+  xlab("Loci") + ylab("-log10(p.values)") +
+  geom_hline(yintercept=-log10(thres_env), linetype="dashed", color = gray(.80), size=0.6) +
+  facet_wrap(~"Manhattan plot", nrow = 3) +
+  guides(color=guide_legend(title="Locus type")) +
+  theme_bw() +
+  theme(legend.position="right", legend.background = element_blank(), panel.grid = element_blank(), legend.box.background = element_blank(), plot.background = element_blank(), panel.background = element_blank(), legend.text=element_text(size=rel(.8)), strip.text = element_text(size=20),text=element_text(size=20,family="open sans"))
+
+ggsave("bly_2024_outlier_manhattan_plot.svg",dpi=300,device="svg")
+
+#plot the populations in the RDA space, need to re-level:
+bly_phen2 <- bly_phen_all
+bly_phen2$CLUSTER <- factor(bly_phen2$CLUSTER)
+levels(bly_phen2$CLUSTER) <-c("Oregon","Meridian","BealeAFB","Kiefer","Cook","Werre","Triangle","Rockpools","UCMerced","Dutchman","CrossCreek","FHL","Pixley","SkunkHollow")
+eco <- bly_phen2$CLUSTER
+bg <- c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373")
+par(bg="white",family="open sans")
+plot(RDA_env, type="n", scaling=2, xlim=c(-4,10), ylim=c(-6,6))
+points(RDA_env, display="species", pch=20, cex=0.7, col="gray32", scaling=3)
+points(RDA_env, display="sites", pch=21, cex=1.8, col="gray32", bg=bg[eco])
+text(RDA_env, scaling=2, display="bp", col="#000000", cex=0.8)
+legend("topleft", legend=levels(eco), bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+
+
+#last thing to do is to plot a PCA of just our climate variables, no genotypes, to show how different things are ecologically.
+
+clim_pc <- clim[5:17] #can't test all 27 variables (need fewer climate than population variables, n=14), so the most impactful 14 are included here
+scaled_clim <- scale(clim_pc)
+pca <- rda(scaled_clim, scale=T) #vegan rda conditioned on nothing
+pc <- as.data.frame(pca$CA$u) #make a dataframe for ggplotting, because biplots are the worst
+pc$Population <- row.names(clim) #add metadata
+pop_meta <- read.delim("~/Documents/Documents_Local/shrimp/rad/bly_2024/bly_2024_population_meta.txt") #this is open somewhere, I think, but opening again. Population-level metadata
+colnames(pop_meta) <- c("Population","lat","long","valley")
+pc <- inner_join(pc,pop_meta,by="Population")
+
+#I tried a few ways of getting the biplot arrows in here but can't get it working
+ggplot(pca, aes(PC1, PC2, fill=Population)) + geom_point(shape=21,size=8,stroke=1)+fill_palette(c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373")) +xlab("PC1") + ylab("PC2") +ggtitle("VPFS Climate Loci PC1-PC2") + theme_minimal() + theme(text=element_text(size=22,family="open sans"), axis.text = element_text(size=22),axis.title=element_text(size=22),legend.text = element_text(size=22),legend.title=element_text(size=22))
+
+ggsave("bly_2024_climate_loci_pca_pc1pc2.svg",device="svg",dpi=300)
+
+ggplot(pca, aes(PC1, PC3, fill=Population)) + geom_point(shape=21,size=8,stroke=1)+fill_palette(c("#3568b3", "#3ba5b1", "#6ec7c4", "#629d84", "#a5deba","#92c46d", "#b085d6", "#ab47bc", "#ffccbc", "#ffd54f", "#f7e27d", "#f5a623", "#ff6f61", "#e57373")) +xlab("PC1") + ylab("PC3") +ggtitle("VPFS Climate Loci PC1-PC3") + theme_minimal() + theme(text=element_text(size=22,family="open sans"), axis.text = element_text(size=22),axis.title=element_text(size=22),legend.text = element_text(size=22),legend.title=element_text(size=22))
+ggsave("bly_2024_climate_loci_pca_pc1pc3.svg",device="svg",dpi=300)
+
+
+#all done!! The only figure or supplemental figure not in here is the delta-K graph of the best K admix, which is taken directly from clumpak, and the admix plots themselves which I do in the browser/shiny version of pophelper (www.pophelper.com). The bash scripts for alignment, genotype calling, ba3, svdq, and ngsadmix are in separate files.
+
+```
